@@ -243,7 +243,9 @@ column that references `Membership`, but `Membership` doesn't exist yet when
 `Member`'s table is created (ordering: members → tenant → memberships). Don't
 solve this with a third `AddCurrentMembershipToMembers` migration. Instead:
 
-- Add the plain column (no FK yet) inside the `create_members` migration.
+- Add the reference column with `foreign_key: false` (no FK yet) inside the
+  `create_members` migration. Never use `t.uuid` directly for an association
+  column — always `t.references`, even when the FK constraint is deferred.
 - Add the foreign key constraint at the end of the `create_memberships`
   migration, once the `memberships` table actually exists:
 
@@ -253,12 +255,10 @@ class CreateMembers < ActiveRecord::Migration[8.1]
   def change
     create_table :members, id: :uuid do |t|
       t.references :{{resource}}, null: false, foreign_key: true, type: :uuid
-      t.uuid :current_membership_id
+      t.references :current_membership, foreign_key: false, type: :uuid
 
       t.timestamps
     end
-
-    add_index :members, :current_membership_id
   end
 end
 ```
@@ -377,8 +377,9 @@ add its `has_one`, and the matching `when` in `create_associate_resource!`.
 For each role, its own controller namespace with an `ApplicationController`
 that inherits from the global `ApplicationController` and enforces the role,
 plus a default `DashboardController` — the same format as a classic Rails
-admin namespace (`Admin::ApplicationController` + `Admin::DashboardController`
-with `root to: "dashboard#index"` inside its own namespace).
+admins namespace (`Admins::ApplicationController` + `Admins::DashboardController`
+with `root to: "dashboard#index"` inside its own namespace). Namespace is
+always plural, English (`admins`, not `admin`).
 
 ```ruby
 # app/controllers/{{role}}/application_controller.rb
@@ -434,12 +435,10 @@ class CreateMembers < ActiveRecord::Migration[8.1]
   def change
     create_table :members, id: :uuid do |t|
       t.references :{{resource}}, null: false, foreign_key: true, type: :uuid
-      t.uuid :current_membership_id
+      t.references :current_membership, foreign_key: false, type: :uuid
 
       t.timestamps
     end
-
-    add_index :members, :current_membership_id
   end
 end
 ```
@@ -462,7 +461,7 @@ class Create{{Tenant}}s < ActiveRecord::Migration[8.1]
   def change
     create_table :{{tenants}}, id: :uuid do |t|
       t.string :name, null: false
-      # any tenant-specific fields agreed on in step 0
+      # any tenant-specific fields the user explicitly asked for — none by default
 
       t.timestamps
     end
@@ -619,11 +618,15 @@ Note `{{Resource}}` (e.g. `Account`) has no `dependent: :destroy` on its
 cascading destructively by default. Whoever deletes an `{{Resource}}` is
 responsible for cleaning up its `member`/`admin` first.
 
-### B8. Controllers: admin namespace + tenant-scoped namespace
+### B8. Controllers: admins namespace + tenant-scoped namespace
+
+Controller namespaces are always plural, English — `admins`, not `admin`
+(same rule as `{{tenants}}`: `clinics`, not `clinic`; `customers`, not
+`customer`).
 
 ```ruby
-# app/controllers/admin/application_controller.rb
-class Admin::ApplicationController < ApplicationController
+# app/controllers/admins/application_controller.rb
+class Admins::ApplicationController < ApplicationController
   before_action :authenticate_{{resource}}!
   before_action :require_admin!
 
@@ -638,8 +641,8 @@ end
 ```
 
 ```ruby
-# app/controllers/admin/dashboard_controller.rb
-class Admin::DashboardController < Admin::ApplicationController
+# app/controllers/admins/dashboard_controller.rb
+class Admins::DashboardController < Admins::ApplicationController
   def index
   end
 end
@@ -690,14 +693,14 @@ end
 ```
 
 Each namespace has its own `ApplicationController` — never share one across
-`Admin` and `{{Tenant}}s`.
+`Admins` and `{{Tenant}}s`.
 
 ### B9. Routes
 
 ```ruby
 devise_for :{{resources}}
 
-namespace :admin do
+namespace :admins do
   root to: "dashboard#index"
 end
 
@@ -723,7 +726,7 @@ class ApplicationController < ActionController::Base
   protected
 
     def after_sign_in_path_for(resource)
-      return admin_root_path if resource.respond_to?(:admin?) && resource.admin?
+      return admins_root_path if resource.respond_to?(:admin?) && resource.admin?
 
       root_path
     end
@@ -752,6 +755,15 @@ rails generate devise:views
 Generates views under `app/views/devise/*`, ready to customize with the
 project's design system.
 
+After generating, edit every view under `app/views/devise/*`:
+
+- Remove `autofocus: true` from every field — don't leave it on any input.
+- Remove `autocomplete: "..."` from every field — don't add or leave it on
+  any input.
+- In `registrations/new.html.erb`, add an input for each extra field from
+  Step 0.4 (e.g. `first_name`, `last_name`) with `required: true`, placed
+  before the email field.
+
 ### 12. Verify end to end
 
 Before calling the setup done:
@@ -779,7 +791,7 @@ Before calling the setup done:
 - [ ] No migration created for something that could be folded into a migration from this same setup (see "Folding migrations")
 - [ ] `{{Resource}}` = the sole authenticatable model
 - [ ] Pattern A: `role` enum + `after_create :create_associate_resource!` on `{{Resource}}`, thin satellite models with `belongs_to :{{resource}}`, `{{Role}}::ApplicationController` + `{{Role}}::DashboardController` per role
-- [ ] Pattern B: fixed `member`/`admin` role on `{{Resource}}`; `Member`/`Admin` satellites; `Membership` (fixed `owner`/`member` role, unique-owner-per-tenant partial index) joining `Member` to `{{Tenant}}`; `current_membership_id` on `Member` with `on_delete: :nullify`; `MembershipInvite`; `Admin::*` + `{{Tenant}}s::*` controller namespaces
+- [ ] Pattern B: fixed `member`/`admin` role on `{{Resource}}`; `Member`/`Admin` satellites; `Membership` (fixed `owner`/`member` role, unique-owner-per-tenant partial index) joining `Member` to `{{Tenant}}`; `current_membership_id` on `Member` with `on_delete: :nullify`; `MembershipInvite`; `Admins::*` + `{{Tenant}}s::*` controller namespaces (namespaces always plural)
 - [ ] If NOT using any pattern: `{{Resource}}` stays simple, no enum, no satellites, no controller namespaces
 - [ ] `devise_for :{{resources}}` in routes
 - [ ] `configure_permitted_parameters` in `ApplicationController`
@@ -794,11 +806,14 @@ Before calling the setup done:
 - Don't make a satellite model (`User`, `Member`, etc.) the authenticatable one directly — it always goes through `{{Resource}}`.
 - Don't put business logic specific to one role inside `{{Resource}}` — that lives in each satellite model.
 - Don't use `id: :bigint` (the default) on new tables — the standard is UUID.
+- Don't use `t.uuid :foo_id` directly for an association column — always `t.references :foo, type: :uuid` (add `foreign_key: false` when the target table doesn't exist yet, per "Folding migrations" above).
 - Don't leave "devise" in the file/class name of any generated migration.
 - Don't leave Trackable columns commented out — the model always declares `:trackable`, so the columns must exist. The generator comments them by default; uncomment as part of editing the migration.
 - Don't enable Confirmable/Lockable columns by default in the migration — leave them commented out until needed.
 - Don't forget ActionMailer's `default_url_options` if the project uses `:recoverable` or `:confirmable` — without it, emails break.
 - Don't share one `ApplicationController` across roles or namespaces — each gets its own.
+- Don't name a controller namespace or file in the singular — always plural, English (`admins`, not `admin`; `clinics`, not `clinic`; `customers`, not `customer`).
+- Don't add a `plan`/`tier`/billing field (or any other tenant-specific column) to `{{Tenant}}` unless the user explicitly asked for it in step 0 — billing is its own separate task.
 - Don't create a brand-new migration file for something that can be folded into an existing, not-yet-shipped migration from the same setup (e.g. don't add a separate `AddCurrentMembershipToMembers` migration — put the column in `create_members` and the FK in `create_memberships`).
 - Don't add the `current_membership` foreign key without `on_delete: :nullify` — destroying a membership that's someone's current one will raise `ForeignKeyViolation` instead of clearing the pointer.
 - Don't skip `bundle exec rubocop -A` at the end of the setup.
